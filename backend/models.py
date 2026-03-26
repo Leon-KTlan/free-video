@@ -1,6 +1,6 @@
-"""数据库模型：用户、订阅、下载记录"""
+"""数据库模型：用户、订阅、下载记录、AI摘要记录"""
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from pathlib import Path
 
@@ -28,6 +28,15 @@ class DownloadLog(Base):
     user_id    = Column(String, index=True)          # 匿名用户用 IP
     url        = Column(String)
     quality    = Column(Integer, default=0)          # 实际下载画质高度
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SummaryLog(Base):
+    """AI 摘要使用记录，用于次数限制"""
+    __tablename__ = "summary_logs"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    user_id    = Column(String, index=True)          # 匿名用户用 IP
+    url        = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

@@ -89,12 +89,35 @@
         <button @click="$emit('reset')" class="btn-secondary flex items-center gap-2">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>返回
         </button>
+        <button
+          @click="$emit('summarize')"
+          :disabled="summaryLoading"
+          class="btn-secondary flex items-center gap-2"
+          style="border-color:rgba(139,92,246,0.4);color:#a78bfa"
+        >
+          <svg v-if="!summaryLoading" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2a7 7 0 0 1 7 7c0 3.5-2.5 6.5-6 7.4V18h-2v-1.6C7.5 15.5 5 12.5 5 9a7 7 0 0 1 7-7z"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+          <svg v-else class="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+          {{ summaryLoading ? 'AI 分析中…' : 'AI 摘要' }}
+        </button>
         <button @click="$emit('start')" :disabled="!selectedFormat"
           class="btn-primary flex-1 flex items-center justify-center gap-2">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           开始下载
         </button>
       </div>
+
+      <!-- AI 摘要错误提示 -->
+      <p v-if="summaryError" class="mt-3 text-xs flex items-start gap-1.5" style="color:#f87171">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" class="mt-0.5 flex-shrink-0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+        {{ summaryError }}
+      </p>
+
+      <!-- AI 摘要面板（优先用新 VideoSummary 组件） -->
+      <VideoSummary
+        v-if="summaryData"
+        :data="summaryData"
+        :on-chat="onChat"
+      />
     </template>
 
     <template v-else-if="step==='downloading'">
@@ -151,13 +174,72 @@
   </div>
 </template>
 
+<style scoped>
+.sessdata-block {
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.sessdata-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: .76rem;
+  color: rgba(255,255,255,.4);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.sessdata-summary:hover { color: rgba(255,255,255,.65); }
+.sessdata-body {
+  padding: 8px 12px 12px;
+  border-top: 1px solid rgba(255,255,255,.06);
+}
+.sessdata-tip {
+  font-size: .73rem;
+  color: rgba(255,255,255,.3);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.sessdata-tip code {
+  background: rgba(255,140,0,.15);
+  color: #ff8c00;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+.sessdata-input {
+  width: 100%;
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  padding: 7px 11px;
+  color: #e8eaf0;
+  font-size: .82rem;
+  outline: none;
+  transition: border-color .2s;
+  box-sizing: border-box;
+}
+.sessdata-input::placeholder { color: rgba(255,255,255,.2); }
+.sessdata-input:focus { border-color: rgba(255,140,0,.5); }
+</style>
+
 <script setup>
+import VideoSummary from './VideoSummary.vue'
+import AISummaryPanel from './AISummary.vue'
+
 defineProps({
   step: String, url: String, loading: Boolean, errorMsg: String,
   videoInfo: Object, selectedFormat: String,
-  progress: Object, downloadUrl: String, downloadFilename: String
+  progress: Object, downloadUrl: String, downloadFilename: String,
+  summaryLoading: { type: Boolean, default: false },
+  summaryError: { type: String, default: '' },
+  summaryData: { type: Object, default: null },
+  onChat: { type: Function, default: null },
 })
-defineEmits(['update:url','fetch','update:selected-format','start','reset'])
+defineEmits(['update:url','fetch','update:selected-format','start','reset','summarize'])
 
 function fmtDur(s) {
   if (!s) return ''

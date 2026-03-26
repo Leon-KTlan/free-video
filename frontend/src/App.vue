@@ -22,16 +22,21 @@
 
         <!-- Main card -->
         <div class="glass-card max-w-3xl mx-auto p-6 md:p-8">
-          <MainCard
+        <MainCard
             :step="step" :url="url" :loading="loading" :error-msg="errorMsg"
             :video-info="videoInfo" :selected-format="selectedFormat"
             :progress="progress" :download-url="downloadUrl" :download-filename="downloadFilename"
             :user-plan="userPlan"
+            :summary-loading="summaryLoading"
+            :summary-error="summaryError"
+            :summary-data="summaryData"
+            :on-chat="chatWithVideo"
             @update:url="url=$event"
             @fetch="fetchInfo"
             @update:selected-format="selectedFormat=$event"
             @start="startDownload"
             @reset="reset"
+            @summarize="summarizeVideo"
           />
         </div>
       </main>
@@ -67,6 +72,9 @@ const errorMsg = ref('')
 const userPlan = ref('free')
 const userEmail = ref('')
 const pricingRef = ref(null)
+const summaryLoading = ref(false)
+const summaryError = ref('')
+const summaryData = ref(null)
 let taskId = ''
 
 onMounted(async () => {
@@ -107,6 +115,9 @@ async function fetchInfo() {
   if (!url.value.trim()) return
   loading.value = true
   errorMsg.value = ''
+  // 切换视频时清空上次摘要
+  summaryData.value = null
+  summaryError.value = ''
   try {
     const res = await axios.post('/api/info', { url: url.value.trim() })
     Object.assign(videoInfo, res.data)
@@ -169,5 +180,43 @@ function reset() {
   downloadUrl.value = ''
   downloadFilename.value = ''
   Object.assign(videoInfo, { title:'', thumbnail:'', duration:0, uploader:'', platform:'', formats:[] })
+  summaryData.value = null
+  summaryError.value = ''
+}
+
+async function summarizeVideo() {
+  if (summaryLoading.value) return
+  summaryLoading.value = true
+  summaryError.value = ''
+  summaryData.value = null
+  const token = localStorage.getItem('vs_token')
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+  try {
+    const res = await axios.post('/api/v2/summarize',
+      { url: url.value.trim(), title: videoInfo.title },
+      { headers, timeout: 120000 }
+    )
+    summaryData.value = res.data
+  } catch (e) {
+    const detail = e.response?.data?.detail
+    if (detail?.upgrade) {
+      summaryError.value = detail.message
+      pricingRef.value?.showLimitModal(detail.message)
+    } else {
+      summaryError.value = (typeof detail === 'string' ? detail : detail?.message) || 'AI 摘要生成失败，请重试'
+    }
+  } finally {
+    summaryLoading.value = false
+  }
+}
+
+async function chatWithVideo(question, history) {
+  const token = localStorage.getItem('vs_token')
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+  const res = await axios.post('/api/v2/chat',
+    { url: url.value.trim(), title: videoInfo.title, history, question },
+    { headers, timeout: 60000 }
+  )
+  return res.data.answer
 }
 </script>

@@ -1,31 +1,38 @@
-# VideoSnap — 万能视频下载器
+# VideoSnap — 万能视频下载 + AI 摘要
 
-> 基于 **yt-dlp + FastAPI + Vue 3** 构建，支持 B站、YouTube、抖音、Twitter 等 1800+ 平台一键解析下载。
+> 基于 **yt-dlp + FastAPI + Vue 3** 构建，支持 B站、YouTube、抖音、Twitter 等 1800+ 平台一键解析下载，并提供 AI 视频摘要功能。
 
 ---
 
 ## 技术栈
 
 | 层次 | 技术 |
-|------|---------|
+|------|------|
 | 前端 | Vue 3 + Vite + Tailwind CSS |
 | 后端 | FastAPI + uvicorn (Python 3.9+) |
 | 下载引擎 | yt-dlp 2025.10.14 |
 | 进度推送 | Server-Sent Events (SSE) |
-| 封面代理 | FastAPI 后端代理（解决防盗链）|
+| AI 摘要 | DeepSeek Chat API |
+| 字幕提取 | yt-dlp（公开字幕） |
 
 ---
 
 ## 功能特性
 
+### 视频下载
 - **多平台支持**：YouTube、B站、抖音、Twitter/X、Instagram、TikTok 等 1800+
 - **多画质选择**：1080p / 720p / 480p / 360p / 最佳画质
 - **有声音的 mp4**：自动检测 ffmpeg，分离流自动合并视频+音频
 - **封面预览**：后端代理封面图，解决防盗链
 - **实时进度**：SSE 推送下载进度、速度、剩余时间
-- **代理自适应**：自动读取 macOS 系统代理（`scutil --proxy`），无需手动配置
-- **SSL 修复**：`--legacy-server-connect` 修复 B站等平台的 SSL EOF 错误
-- **错误友好提示**：403/404/SSL/ffmpeg 缺失等均有中文说明
+- **代理自适应**：自动读取 macOS 系统代理，无需手动配置
+
+### AI 视频摘要（新功能）
+- **一键摘要**：提取视频字幕，DeepSeek 生成结构化摘要
+- **4 个维度展示**：总结 / 字幕原文 / 思维导图 / AI 问答
+- **支持平台**：YouTube（有 CC 字幕）、TED、Coursera 等
+- **B站暂不支持**：B站字幕需登录获取，暂不支持
+- **AI 问答**：严格基于视频字幕内容回答，不虚构
 
 ---
 
@@ -36,13 +43,20 @@
 ```bash
 # Python 依赖
 python3 -m venv venv
-venv/bin/pip install -r requirements.txt
+venv/bin/pip install -r backend/requirements.txt
 
 # 前端依赖
 cd frontend && npm install && cd ..
 
-# ffmpeg（合并 B站等平台分离流必须）
+# ffmpeg（合并分离流必须）
 brew install ffmpeg
+```
+
+### 配置 AI 摘要
+
+在 `backend/app.py` 中配置 DeepSeek Key（已内置，可替换）：
+```python
+_DEEPSEEK_KEY = "sk-your-deepseek-key"
 ```
 
 ### 启动服务
@@ -50,12 +64,12 @@ brew install ffmpeg
 > ⚠️ 必须在系统终端（iTerm/Terminal.app）运行，不要用 Cursor 内置终端
 
 ```bash
-# 方式一：一键启动脚本
+# 方式一：一键启动
 bash start.sh
 
 # 方式二：手动启动
 # 终端 1 — 后端
-venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+cd backend && ../venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 
 # 终端 2 — 前端
 cd frontend && npm run dev
@@ -66,18 +80,27 @@ cd frontend && npm run dev
 | 地址 | 说明 |
 |------|------|
 | http://localhost:5173 | 前端页面 |
-| http://localhost:8000/api/health | 后端状态（含代理/ffmpeg 检测结果）|
+| http://localhost:8000/api/health | 后端状态 |
+| http://localhost:8000/api/v2/subtitle-status | 字幕能力状态 |
 
 ---
 
 ## 使用流程
 
-1. 复制视频链接（B站 / YouTube / 抖音 / Twitter 等）
-2. 粘贴到输入框，点击「解析」
-3. 查看封面、标题、时长
-4. 从格式列表选择画质
-5. 点击「开始下载」，实时查看进度条
-6. 下载完成后点击「保存文件」
+### 视频下载
+1. 粘贴视频链接 → 点击「解析」
+2. 查看封面、标题、时长
+3. 选择画质 → 点击「开始下载」
+4. 实时查看进度 → 下载完成点击「保存文件」
+
+### AI 摘要（YouTube 等有字幕视频）
+1. 解析视频后点击「AI 摘要」按钮
+2. 等待约 20-40 秒
+3. 查看四个维度：
+   - **总结**：一句话概述 + 核心要点
+   - **字幕**：完整字幕原文
+   - **导图**：思维导图
+   - **问答**：针对视频内容提问
 
 ---
 
@@ -85,67 +108,107 @@ cd frontend && npm run dev
 
 ```
 free-video/
-├── app.py                  # FastAPI 后端（解析/下载/进度/封面代理）
-├── requirements.txt        # Python 依赖
-├── test_api.py             # API 测试脚本
-├── start.sh                # 一键启动脚本
-├── run_backend.sh          # 仅启动后端
-├── downloads/              # 视频下载目录（自动创建）
-└── frontend/
-    ├── src/
-    │   ├── App.vue
-    │   ├── style.css
-    │   └── components/
-    │       ├── Header.vue      # 顶部导航
-    │       ├── MainCard.vue    # 核心卡片（输入→格式→进度→完成）
-    │       ├── Stats.vue       # 平台统计
-    │       ├── Features.vue    # 功能介绍
-    │       ├── Platforms.vue   # 支持平台展示
-    │       └── Footer.vue      # 底部 FAQ
-    ├── vite.config.js          # Vite 配置（/api 代理→8000）
-    ├── tailwind.config.js
-    └── package.json
+├── backend/
+│   ├── app.py                  # FastAPI 主应用
+│   ├── subtitle_extractor.py   # 字幕提取模块（新）
+│   ├── video_summarizer.py     # AI 摘要模块（新）
+│   ├── ai_summary.py           # 旧版 AI 摘要（保留兼容）
+│   ├── auth.py                 # 用户认证
+│   ├── models.py               # 数据库模型
+│   ├── payment.py              # 支付模块
+│   ├── plans.py                # 套餐配置
+│   ├── requirements.txt        # Python 依赖
+│   └── SUBTITLE_SETUP.md       # 字幕配置说明
+├── frontend/
+│   └── src/
+│       ├── App.vue             # 根组件
+│       └── components/
+│           ├── MainCard.vue    # 核心交互卡片
+│           ├── VideoSummary.vue # AI 摘要面板（新）
+│           ├── AISummary.vue   # 旧版摘要面板
+│           ├── Header.vue
+│           ├── Features.vue
+│           ├── Pricing.vue
+│           ├── Platforms.vue
+│           └── Footer.vue
+├── start.sh                    # 一键启动
+└── README.md
 ```
+
+---
+
+## API 说明
+
+### 新版 AI 摘要接口
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/v2/summarize` | POST | 提取字幕 + 生成摘要 |
+| `/api/v2/chat` | POST | 基于字幕的 AI 问答 |
+| `/api/v2/subtitle-status` | GET | 字幕提取能力状态 |
+
+```json
+// POST /api/v2/summarize
+{ "url": "https://...", "title": "视频标题" }
+
+// 返回
+{
+  "success": true,
+  "summary": "核心概述",
+  "keypoints": ["要点1", "要点2"],
+  "chapters": [{"time": "00:00", "title": "章节", "content": "..."}],
+  "mindmap": {"name": "主题", "children": [...]},
+  "transcript": "完整字幕文本"
+}
+```
+
+### 字幕支持状态
+
+| 平台 | 状态 | 说明 |
+|------|------|------|
+| YouTube | ✅ | 有 CC 字幕（手动/自动）均可 |
+| TED | ✅ | 官方字幕 |
+| Coursera | ✅ | 课程字幕 |
+| B站 | ❌ | 需登录，暂不支持 |
+| 抖音 | ❌ | 无公开字幕 |
 
 ---
 
 ## 关键技术说明
 
+### 字幕提取策略
+1. yt-dlp 提取公开字幕（VTT 格式）
+2. 优先级：手动中文 > 手动英文 > 自动中文 > 自动英文
+3. B站直接返回不支持提示
+
 ### 代理自动检测
-后端启动时通过 `scutil --proxy` 读取 macOS 系统代理，自动传给 yt-dlp。
-无需手动设置，支持 Clash、V2Ray 等任意代理工具。
+后端通过 `scutil --proxy` 读取 macOS 系统代理，自动传给 yt-dlp，支持 Clash、V2Ray 等任意代理工具。
 
-### 分离流合并（需要 ffmpeg）
-B站等平台的视频流和音频流是分开的（分离流）。
-- **有 ffmpeg**：下载 `视频流+bestaudio` 并自动合并为 mp4（有声音）
-- **无 ffmpeg**：降级为平台提供的合流格式（画质较低但有声音）
+### 分离流合并
+B站等平台视频流和音频流分离：
+- **有 ffmpeg**：自动合并为有声音的 mp4
+- **无 ffmpeg**：降级为合流格式
 
-安装 ffmpeg：`brew install ffmpeg`
-
-### subprocess 调用 yt-dlp
-Python 3.9 与 yt-dlp 最新版存在兼容性问题（yt-dlp 已弃用 3.9 支持）。
-后端改用 `subprocess` 直接调用 `venv/bin/yt-dlp` CLI，完全绕过该问题。
+安装：`brew install ffmpeg`
 
 ---
 
 ## 常见问题
 
-**Q: B站下载后视频没有声音 / 格式是 m4a？**
-A: 没有安装 ffmpeg。运行 `brew install ffmpeg` 后重启后端即可。
+**Q: B站 AI 摘要为什么不支持？**
+A: B站字幕文件需要登录态 Cookie 才能获取，未登录时 API 返回空列表。技术上可行但需要用户提供 SESSDATA，暂未实现。
 
-**Q: 解析失败，提示 403？**
-A: 该视频有地区限制或需要登录。可在 `app.py` 中配置 `--cookies-from-browser chrome`。
+**Q: YouTube 有字幕但摘要失败？**
+A: 确认视频播放器有 CC 按钮，且网络代理正常（后端需要能访问 YouTube）。
 
-**Q: YouTube 提示需要登录验证？**
-A: YouTube 对自动化访问限制增强。用 `--cookies-from-browser chrome` 传入浏览器 Cookie。
+**Q: B站下载后视频没有声音？**
+A: 需要安装 ffmpeg：`brew install ffmpeg`，然后重启后端。
 
 **Q: 为什么不能在 Cursor 内置终端运行？**
-A: Cursor IDE 沙盒有独立代理（127.0.0.1:52671），会屏蔽视频平台请求。
-系统终端直接使用系统代理（如 Clash 的 7897 端口），可正常访问。
+A: Cursor IDE 沙盒屏蔽了视频平台请求，必须在系统终端（iTerm/Terminal.app）启动。
 
 **Q: 手机如何访问？**
-A: 确保手机和电脑在同一 WiFi，访问 `http://[电脑IP]:5173`。
-查询电脑 IP：`ipconfig getifaddr en0`
+A: 同一 WiFi 下访问 `http://[电脑IP]:5173`，查询 IP：`ipconfig getifaddr en0`
 
 ---
 

@@ -16,10 +16,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import yt_dlp
 
-from models import init_db, get_db, DownloadLog
+from models import init_db, get_db, DownloadLog, SummaryLog
 from auth import router as auth_router, get_current_user, get_user_plan
 from payment import router as payment_router
 from plans import PLANS
+import ai_summary
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -37,6 +38,10 @@ app.include_router(payment_router)
 # 初始化数据库
 init_db()
 
+# 初始化 DeepSeek AI 客户端
+_DEEPSEEK_KEY = "sk-e986e9472e9b43d381643e73723d7677"
+ai_summary.init_deepseek(_DEEPSEEK_KEY)
+
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 download_progress: dict = {}
@@ -48,7 +53,17 @@ FAKE_HEADERS = {
     "Referer": "https://www.bilibili.com/",
 }
 
-YTDLP_BIN = str(Path("venv/bin/yt-dlp").resolve())
+def _find_ytdlp_bin() -> str:
+    candidates = [
+        Path(__file__).parent.parent / "venv" / "bin" / "yt-dlp",  # backend/ 目录启动
+        Path("venv/bin/yt-dlp").resolve(),                          # 根目录启动
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return "yt-dlp"  # fallback: 系统 PATH
+
+YTDLP_BIN = _find_ytdlp_bin()
 
 
 def _detect_proxy() -> str:
@@ -409,6 +424,299 @@ async def download_file(task_id: str, filename: str):
         filename=filename,
         media_type="application/octet-stream",
     )
+
+
+# ═══════════════════════════════════════════════════════════
+# AI 摘要相关路由
+# ═══════════════════════════════════════════════════════════
+
+class SummarizeRequest(BaseModel):
+    url: str
+    title: str = ""
+
+class ChatRequest(BaseModel):
+    url: str
+    title: str = ""
+    history: list = []
+    question: str
+
+
+def check_summary_limit(user_id: str, plan: str, db: Session):
+    """检查 AI 摘要次数限制"""
+    plan_cfg = PLANS[plan]
+    daily_limit = plan_cfg.get("daily_summaries", 2)
+    if daily_limit < 0:  # -1 表示无限制
+        return
+    today_start = datetime.combine(date.today(), datetime.min.time())
+    count = db.query(SummaryLog).filter(
+        SummaryLog.user_id == user_id,
+        SummaryLog.created_at >= today_start,
+    ).count()
+    if count >= daily_limit:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "summary_limit",
+                "message": f"今日 AI 摘要次数已用完（{daily_limit} 次），升级套餐获得更多次数",
+                "upgrade": True,
+            }
+        )
+
+
+@app.post("/api/summarize")
+async def summarize_video(
+    req: SummarizeRequest,
+    request: Request,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """提取字幕 + AI 生成摘要（一次调用完成）"""
+    plan = get_user_plan(user)
+    user_id = user.id if user else (request.client.host or "anonymous")
+
+    check_summary_limit(user_id, plan, db)
+
+    try:
+        # 1. 提取字幕（耗时操作，在线程池执行）
+        loop = asyncio.get_event_loop()
+        subtitle_text = await loop.run_in_executor(
+            None, ai_summary.extract_subtitle, req.url
+        )
+
+        if not subtitle_text.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="该视频暂无可用字幕，无法生成 AI 摘要。建议换一个有字幕的视频（如 YouTube 技术教程、TED 演讲，或 B站有 UP 主上传字幕的视频）"
+            )
+
+        # 2. DeepSeek 生成摘要（耗时操作，在线程池执行）
+        result = await loop.run_in_executor(
+            None, ai_summary.generate_summary, req.title or "未知视频", subtitle_text
+        )
+
+        # 3. 记录使用日志
+        db.add(SummaryLog(user_id=user_id, url=req.url))
+        db.commit()
+
+        return {
+            "success": True,
+            "has_subtitle": True,
+            "subtitle_length": len(subtitle_text),
+            **result,
+        }
+
+    except HTTPException:
+        raise
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="字幕提取超时，请稍后重试")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 摘要生成失败: {str(e)[:300]}")
+
+
+@app.post("/api/chat")
+async def chat_with_video(
+    req: ChatRequest,
+    request: Request,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """基于视频字幕的 AI 问答"""
+    plan = get_user_plan(user)
+    user_id = user.id if user else (request.client.host or "anonymous")
+
+    # 问答复用摘要次数限制（每次问答也消耗一次）
+    check_summary_limit(user_id, plan, db)
+
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="问题不能为空")
+    if len(req.question) > 500:
+        raise HTTPException(status_code=400, detail="问题过长，请精简后重试")
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        # 优先从缓存取字幕，无缓存则重新提取
+        subtitle_text = await loop.run_in_executor(
+            None, ai_summary.extract_subtitle, req.url
+        )
+
+        if not subtitle_text.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="该视频暂无字幕，无法进行 AI 问答"
+            )
+
+        answer = await loop.run_in_executor(
+            None,
+            ai_summary.chat_with_video,
+            req.title or "未知视频",
+            subtitle_text,
+            req.history,
+            req.question,
+        )
+
+        # 记录使用日志
+        db.add(SummaryLog(user_id=user_id, url=req.url))
+        db.commit()
+
+        return {"answer": answer}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 问答失败: {str(e)[:300]}")
+
+
+# ═══════════════════════════════════════════════════════════
+# V2 AI 摘要路由（新模块，不影响已有 /api/summarize 和 /api/chat）
+# ═══════════════════════════════════════════════════════════
+import subtitle_extractor
+import video_summarizer
+
+# 注入同一个 DeepSeek 客户端给新模块
+from openai import OpenAI as _OpenAI
+video_summarizer.set_client(_OpenAI(api_key=_DEEPSEEK_KEY, base_url="https://api.deepseek.com"))
+
+
+class SummarizeV2Request(BaseModel):
+    url: str
+    title: str = ""
+    sessdata: str = ""  # B站登录态，用于获取 AI 字幕
+
+
+class ChatV2Request(BaseModel):
+    url: str
+    title: str = ""
+    history: list = []
+    question: str
+    sessdata: str = ""  # B站登录态
+
+
+@app.post("/api/v2/summarize")
+async def summarize_v2(
+    req: SummarizeV2Request,
+    request: Request,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """V2: 字幕提取 + AI 摘要（使用新的 subtitle_extractor 模块）"""
+    plan = get_user_plan(user)
+    user_id = user.id if user else (request.client.host or "anonymous")
+
+    # 复用已有的次数限制检查
+    check_summary_limit(user_id, plan, db)
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        # 0. 前置检查：B站暂不支持
+        if not subtitle_extractor.is_supported(req.url):
+            raise HTTPException(
+                status_code=422,
+                detail=subtitle_extractor.unsupported_reason(req.url)
+            )
+
+        # 1. 提取字幕
+        subtitle_text, method = await loop.run_in_executor(
+            None, subtitle_extractor.extract, req.url
+        )
+
+        if not subtitle_text.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="该视频暂无可用字幕，无法生成 AI 摘要。\n建议使用有 CC 字幕的视频，如 YouTube 教程、TED 演讲、Coursera 课程等。"
+            )
+
+        # 2. AI 生成摘要
+        result = await loop.run_in_executor(
+            None,
+            video_summarizer.generate_summary,
+            req.title or "未知视频",
+            subtitle_text,
+        )
+
+        # 3. 记录次数
+        db.add(SummaryLog(user_id=user_id, url=req.url))
+        db.commit()
+
+        return {
+            "success": True,
+            "method": method,
+            "subtitle_length": len(subtitle_text),
+            **result,
+        }
+
+    except HTTPException:
+        raise
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="字幕提取超时，请稍后重试")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"摘要生成失败: {str(e)[:300]}")
+
+
+@app.post("/api/v2/chat")
+async def chat_v2(
+    req: ChatV2Request,
+    request: Request,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """V2: 基于视频字幕的 AI 问答"""
+    plan = get_user_plan(user)
+    user_id = user.id if user else (request.client.host or "anonymous")
+
+    check_summary_limit(user_id, plan, db)
+
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="问题不能为空")
+    if len(req.question) > 500:
+        raise HTTPException(status_code=400, detail="问题过长，请精简后重试")
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        if not subtitle_extractor.is_supported(req.url):
+            raise HTTPException(
+                status_code=422,
+                detail=subtitle_extractor.unsupported_reason(req.url)
+            )
+
+        # 从缓存取字幕（避免重复提取）
+        subtitle_text, _ = await loop.run_in_executor(
+            None, subtitle_extractor.extract, req.url
+        )
+
+        if not subtitle_text.strip():
+            raise HTTPException(status_code=422, detail="该视频暂无字幕，无法进行 AI 问答")
+
+        answer = await loop.run_in_executor(
+            None,
+            video_summarizer.chat,
+            req.title or "未知视频",
+            subtitle_text,
+            req.history,
+            req.question,
+        )
+
+        db.add(SummaryLog(user_id=user_id, url=req.url))
+        db.commit()
+
+        return {"answer": answer}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 问答失败: {str(e)[:300]}")
+
+
+@app.get("/api/v2/subtitle-status")
+async def subtitle_status():
+    """返回字幕提取能力状态"""
+    return {
+        "supported_platforms": ["YouTube", "TED", "Coursera", "Vimeo", "Twitter/X"],
+        "unsupported_platforms": ["bilibili"],
+        "note": "仅支持平台公开提供字幕的视频，B站字幕需登录故暂不支持"
+    }
 
 
 if __name__ == "__main__":
