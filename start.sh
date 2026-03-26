@@ -25,7 +25,7 @@ sleep 1
 # 启动后端（端口 8000）
 echo ""
 echo "[1/2] 启动后端服务..."
-cd "$PROJECT"
+cd "$PROJECT/backend"
 "$PROJECT/venv/bin/uvicorn" app:app --host 0.0.0.0 --port 8000 --reload > /tmp/videosnap_backend.log 2>&1 &
 BACKEND_PID=$!
 echo "后端 PID: $BACKEND_PID"
