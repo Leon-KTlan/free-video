@@ -5,17 +5,25 @@ import re
 import ssl
 import subprocess
 import urllib.request
+from datetime import datetime, date
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 import yt_dlp
+
+from models import init_db, get_db, DownloadLog
+from auth import router as auth_router, get_current_user, get_user_plan
+from payment import router as payment_router
+from plans import PLANS
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-app = FastAPI(title="VideoSnap API", version="1.0.0")
+app = FastAPI(title="VideoSnap API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,6 +31,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
+app.include_router(payment_router)
+
+# 初始化数据库
+init_db()
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -99,6 +112,41 @@ class DownloadRequest(BaseModel):
     url: str
     format_id: str = "best"
     task_id: str
+
+
+def check_download_limit(user_id: str, plan: str, quality: int, db: Session):
+    """检查用户是否超出免费限制"""
+    plan_cfg = PLANS[plan]
+    max_quality = plan_cfg["max_quality"]
+    daily_limit = plan_cfg["daily_downloads"]
+
+    # 画质限制
+    if quality > 0 and max_quality > 0 and quality > max_quality:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "quality_limit",
+                "message": f"免费版最高支持 {max_quality}p，升级套餐解锁更高画质",
+                "upgrade": True,
+            }
+        )
+
+    # 每日次数限制（-1 表示无限）
+    if daily_limit >= 0:
+        today_start = datetime.combine(date.today(), datetime.min.time())
+        count = db.query(DownloadLog).filter(
+            DownloadLog.user_id == user_id,
+            DownloadLog.created_at >= today_start,
+        ).count()
+        if count >= daily_limit:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "daily_limit",
+                    "message": f"今日下载次数已用完（{daily_limit} 次），明天再来或升级套餐",
+                    "upgrade": True,
+                }
+            )
 
 
 @app.get("/")
@@ -293,7 +341,30 @@ def do_download(url: str, format_id: str, task_id: str, output_path: Path):
 
 
 @app.post("/api/download")
-async def start_download(req: DownloadRequest):
+async def start_download(
+    req: DownloadRequest,
+    request: Request,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    plan = get_user_plan(user)
+    user_id = user.id if user else (request.client.host or "anonymous")
+
+    # 从 format_id 猜测画质高度用于限制检查
+    height_guess = 0
+    m = re.search(r"height\s*<=\s*(\d+)", req.format_id)
+    if m:
+        height_guess = int(m.group(1))
+    elif re.match(r"\d+$", req.format_id.split("+")[0]):
+        # 数字 format_id，用格式列表里的高度（无法准确获取，跳过）
+        height_guess = 0
+
+    check_download_limit(user_id, plan, height_guess, db)
+
+    # 记录下载日志
+    db.add(DownloadLog(user_id=user_id, url=req.url, quality=height_guess))
+    db.commit()
+
     task_dir = DOWNLOAD_DIR / req.task_id
     task_dir.mkdir(exist_ok=True)
     thread = threading.Thread(
@@ -302,7 +373,7 @@ async def start_download(req: DownloadRequest):
         daemon=True,
     )
     thread.start()
-    return {"task_id": req.task_id, "status": "started"}
+    return {"task_id": req.task_id, "status": "started", "plan": plan}
 
 
 @app.get("/api/progress/{task_id}")

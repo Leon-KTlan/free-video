@@ -5,7 +5,7 @@
     <div class="orb orb-3"></div>
     <div class="fixed inset-0 z-0 pointer-events-none" style="background-image:linear-gradient(rgba(255,255,255,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.025) 1px,transparent 1px);background-size:60px 60px"></div>
     <div class="relative z-10">
-      <AppHeader />
+      <AppHeader :user-plan="userPlan" :user-email="userEmail" @logout="logout" />
       <main class="px-4 pt-16 pb-8 md:pt-24">
         <!-- Hero -->
         <div class="text-center mb-10">
@@ -26,6 +26,7 @@
             :step="step" :url="url" :loading="loading" :error-msg="errorMsg"
             :video-info="videoInfo" :selected-format="selectedFormat"
             :progress="progress" :download-url="downloadUrl" :download-filename="downloadFilename"
+            :user-plan="userPlan"
             @update:url="url=$event"
             @fetch="fetchInfo"
             @update:selected-format="selectedFormat=$event"
@@ -36,6 +37,7 @@
       </main>
       <Stats />
       <Features />
+      <Pricing ref="pricingRef" :user-plan="userPlan" @upgrade="handleUpgrade" />
       <Platforms />
       <AppFooter />
     </div>
@@ -43,12 +45,13 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import axios from 'axios'
 import AppHeader from './components/Header.vue'
 import MainCard from './components/MainCard.vue'
 import Stats from './components/Stats.vue'
 import Features from './components/Features.vue'
+import Pricing from './components/Pricing.vue'
 import Platforms from './components/Platforms.vue'
 import AppFooter from './components/Footer.vue'
 
@@ -61,7 +64,44 @@ const progress = reactive({ status:'', percent:0, speed:'', eta:'' })
 const downloadUrl = ref('')
 const downloadFilename = ref('')
 const errorMsg = ref('')
+const userPlan = ref('free')
+const userEmail = ref('')
+const pricingRef = ref(null)
 let taskId = ''
+
+onMounted(async () => {
+  const token = localStorage.getItem('vs_token')
+  if (token) {
+    try {
+      const res = await axios.get('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+      userPlan.value = res.data.plan || 'free'
+      userEmail.value = res.data.email || ''
+    } catch { localStorage.removeItem('vs_token') }
+  }
+})
+
+function logout() {
+  localStorage.removeItem('vs_token')
+  userPlan.value = 'free'
+  userEmail.value = ''
+}
+
+async function handleUpgrade({ plan, period }) {
+  const token = localStorage.getItem('vs_token')
+  if (!token) {
+    errorMsg.value = '请先登录后再升级套餐'
+    return
+  }
+  try {
+    const res = await axios.post('/api/payment/checkout',
+      { plan, period },
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+    window.location.href = res.data.checkout_url
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '创建支付会话失败'
+  }
+}
 
 async function fetchInfo() {
   if (!url.value.trim()) return
@@ -84,8 +124,13 @@ async function startDownload() {
   taskId = Date.now().toString(36) + Math.random().toString(36).slice(2)
   step.value = 'downloading'
   Object.assign(progress, { status:'downloading', percent:0, speed:'', eta:'' })
+  const token = localStorage.getItem('vs_token')
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
   try {
-    await axios.post('/api/download', { url: url.value.trim(), format_id: selectedFormat.value, task_id: taskId })
+    await axios.post('/api/download',
+      { url: url.value.trim(), format_id: selectedFormat.value, task_id: taskId },
+      { headers }
+    )
     const es = new EventSource(`/api/progress/${taskId}`)
     es.onmessage = (e) => {
       const data = JSON.parse(e.data)
@@ -103,8 +148,15 @@ async function startDownload() {
     }
     es.onerror = () => { es.close(); errorMsg.value = '连接中断，请重试'; step.value = 'error' }
   } catch (e) {
-    errorMsg.value = e.response?.data?.detail || '启动下载失败'
-    step.value = 'error'
+    const detail = e.response?.data?.detail
+    if (detail?.upgrade) {
+      // 触发升级弹窗
+      pricingRef.value?.showLimitModal(detail.message)
+      step.value = 'select'
+    } else {
+      errorMsg.value = (typeof detail === 'string' ? detail : detail?.message) || '启动下载失败'
+      step.value = 'error'
+    }
   }
 }
 
