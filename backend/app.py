@@ -1,6 +1,9 @@
 import json
 import asyncio
+import os
 import threading
+from dotenv import load_dotenv
+load_dotenv()  # 加载 backend/.env 文件
 import re
 import ssl
 import subprocess
@@ -39,7 +42,7 @@ app.include_router(payment_router)
 init_db()
 
 # 初始化 DeepSeek AI 客户端
-_DEEPSEEK_KEY = "sk-e986e9472e9b43d381643e73723d7677"
+_DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 ai_summary.init_deepseek(_DEEPSEEK_KEY)
 
 DOWNLOAD_DIR = Path("downloads")
